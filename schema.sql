@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS portfolios (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    assets TEXT NOT NULL,
+    budget INTEGER NOT NULL,
+    riskfactor FLOAT NOT NULL
+);
