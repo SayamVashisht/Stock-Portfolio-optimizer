@@ -1,0 +1,11 @@
+flask
+flask-restful
+flask-cors
+PyMySQL
+matplotlib
+plotly
+plotly-express
+seaborn
+pandas
+numpy
+yfinance
