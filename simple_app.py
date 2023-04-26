@@ -1,8 +1,8 @@
 import optimizer
 
 def main():
-    tickers = "AAPL TSLA"
-    minR, maxR = optimizer.optimize(tickers)
+    tickers = ['AAPL', 'MSFT','TSLA']
+    minR, maxR = optimizer.optimize(tickers, 0.5,3)
     print(minR)
     print(maxR)
 
