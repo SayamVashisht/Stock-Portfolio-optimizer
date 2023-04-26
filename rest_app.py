@@ -116,8 +116,8 @@ def delete_portfolio(id):
     return redirect(url_for("index"))
 
 @app.route("/portfolio_optimizer")
-@app.route("/portfolio_optimizer/<string:assets>")
-def portfolio_optimizer(assets=None):
+@app.route("/portfolio_optimizer/<string:assets>/<int:budget>/<float:riskfactor>")
+def portfolio_optimizer(assets=None,budget=None,riskfactor=None):
 
     #ticker_list = "AAPL TSLA"
     data = dict()
@@ -125,36 +125,33 @@ def portfolio_optimizer(assets=None):
         print(assets)
         print(f"assets: {assets} {type(assets)}")
         app.logger.info(assets.split())
-        minRisk, maxReturn = optimizer.optimize(assets)
-        data["minRisk"] = minRisk
-        data["maxReturn"] = maxReturn
-    elif request.args.get("tickers") and len(request.args.get("tickers").split()) >= 2:
-        ticker_list = request.args.get("tickers")
-        app.logger.info(ticker_list.split())
-        minRisk, maxReturn = optimizer.optimize(ticker_list)
-        data["minRisk"] = minRisk
-        data["maxReturn"] = maxReturn
+        vqe, qaoa = optimizer.optimize(assets.split(),riskfactor,budget)
+        data["vqe"] = vqe
+        data["qaoa"] = qaoa
+    # elif request.args.get("tickers") and len(request.args.get("tickers").split()) >= 2:
+    #     ticker_list = request.args.get("tickers")
+    #     app.logger.info(ticker_list.split())
+    #     minRisk, maxReturn = optimizer.optimize(ticker_list)
+    #     data["minRisk"] = minRisk
+    #     data["maxReturn"] = maxReturn
     else:
         data["Error"] = "No portfolio provided"
     app.logger.info(data)
 
     new_data = list()
-    minRisk_data = list()
-    maxReturn_data = list()
+    vqe_data = list()
+    qaoa_data = list()
 
-    for k, v in data["minRisk"].items():
-        for key, val in v.items():
-            minRisk_data.append(tuple([k, val]))
+    for k, v in data["vqe"].items():
+            vqe_data.append(tuple([k, v]))
 
-    for k, v in data["maxReturn"].items():
-        for key, val in v.items():
-            maxReturn_data.append(tuple([k, val]))
-        
-    new_data = [minRisk_data, maxReturn_data]
-
+    for k, v in data["qaoa"].items():
+            qaoa_data.append(tuple([k, v]))
+    new_data = [vqe_data,qaoa_data]
+    app.logger.info(data)
     return render_template("portfolio_optimizer.html", data=new_data)
 
 if __name__ == '__main__':
     # app.run(host="0.0.0.0", port=8090)
     app.secret_key = 'nive'
-    app.run(host="0.0.0.0", port=8090, debug=True)
+    app.run(debug=True)
