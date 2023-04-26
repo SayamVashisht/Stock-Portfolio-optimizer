@@ -1,90 +1,147 @@
-import pandas as pd
+from qiskit import Aer
+from qiskit.utils import algorithm_globals
+from qiskit.algorithms import VQE, QAOA, NumPyMinimumEigensolver
+from qiskit.algorithms.optimizers import COBYLA
+from qiskit.circuit.library import TwoLocal
+from qiskit.utils import QuantumInstance
+from qiskit_finance.applications.optimization import PortfolioOptimization
+from qiskit_finance.data_providers import YahooDataProvider
+from qiskit_optimization.algorithms import MinimumEigenOptimizer
+from qiskit_optimization.applications import OptimizationApplication
+from qiskit_optimization.converters import QuadraticProgramToQubo
+from qiskit_optimization import QuadraticProgram
+from scipy.optimize import minimize
+import numpy as np
+import matplotlib.pyplot as plt
+import datetime
 import numpy as np
 import yfinance as yf
-import matplotlib.pyplot as plt
-from pandas.plotting import register_matplotlib_converters
-register_matplotlib_converters()
-import json
-import plotly
-import plotly.express as px
+import pandas as pd
+import random
 
-def download_prices(tickers):
-    df = yf.download(tickers.split(), '2020-1-1')['Adj Close']
-    df = df[-253:]
-    return df
 
-def calculate_variables(df):
-    daily_ret = df.pct_change()
-    NUM_DAYS = daily_ret.count()
-    annual_ret = daily_ret.mean() * NUM_DAYS
-    cov_daily = daily_ret.cov()
-    cov_annual = cov_daily * NUM_DAYS
-    return annual_ret, cov_annual
+def index_to_selection(i, num_assets):
+    s = "{0:b}".format(i).rjust(num_assets)
+    x = np.array([1 if s[i] == "1" else 0 for i in reversed(range(num_assets))])
+    return x
 
-def calculate_eff_frontier(df, annual_ret, cov_annual):
-    NUM_ASSETS = len(df.columns)
-    NUM_PORTFOLIOS = 50000
-    # empty lists to store returns, volatility and weights of imiginary portfolios
-    port_returns = []
-    port_volatility = []
-    stock_weights = []
-    sharpe_ratio = []
+def portfolio_val(weights,returns):
+  weights = np.array(weights)
+  expected_return = np.sum((returns.mean()* weights) * 252)
+  expected_vol = np.sqrt(np.dot(weights.T,np.dot(returns.cov()*252,weights)))
+  sharpe_r = expected_return/expected_vol
+  return np.array([expected_return,expected_vol,sharpe_r])
+
+def sr_negate(weights,returns):
+  neg_sr = portfolio_val(weights,returns)[2] * -1
+  return neg_sr
+
+def weight_check(weights):
+  weights_sum = np.sum(weights)
+  return weights_sum - 1
+def insert_tuples(n):
+    return [(0, 1) for i in range(n)]
+
+
+def optimize(stocks,q,budget):
+    num_assets = len(stocks)
+    seed = 123
+
+    data = YahooDataProvider(
+        tickers=stocks,
+        start=datetime.datetime(2018, 1, 1),
+        end=datetime.datetime(2023, 12, 31)
+    )
+    data.run()
+    mu = data.get_period_return_mean_vector()
+    sigma = data.get_period_return_covariance_matrix()
+
+    start_date = '2018-01-01'
+    end_date = '2023-12-31'
+
+    # Create placeholder for data
+    data2 = pd.DataFrame(columns=stocks)
+
+    # Fetch the data
+    for ticker in stocks:
+        data2[ticker] = yf.download(ticker, start_date,end_date)['Adj Close']
+
+    penalty = num_assets  # set parameter to scale the budget penalty term
+
+    portfolio = PortfolioOptimization(
+        expected_returns=mu, covariances=sigma, risk_factor=q, budget=budget
+    )
+    qp = portfolio.to_quadratic_program()
     
-    # populate the empty lists with each portfolios returns,risk and weights
-    for portfolio in range(NUM_PORTFOLIOS):
-        weights = np.random.random(NUM_ASSETS)
-        weights /= np.sum(weights)
-        returns = np.dot(weights, annual_ret)
-        volatility = np.sqrt(np.dot(weights.T, np.dot(cov_annual, weights)))
-        sharpe = returns / volatility
-        sharpe_ratio.append(sharpe)
-        port_returns.append(returns)
-        port_volatility.append(volatility)
-        stock_weights.append(weights)
+    #VQE
+    algorithm_globals.random_seed = 1234
+    backend = Aer.get_backend("qasm_simulator")
+    cobyla = COBYLA()
+    cobyla.set_options(maxiter=500)
+    ry = TwoLocal(num_assets, "ry", "cz", reps=3, entanglement="full")
+    quantum_instance = QuantumInstance(backend=backend, seed_simulator=seed, seed_transpiler=seed)
+    vqe_mes = VQE(ry, optimizer=cobyla, quantum_instance=quantum_instance)
+    vqe = MinimumEigenOptimizer(vqe_mes)
+    vqe_result = vqe.solve(qp)
+
+    #QAOA
+    algorithm_globals.random_seed = 1234
+    backend = Aer.get_backend("qasm_simulator")
+    cobyla = COBYLA()
+    cobyla.set_options(maxiter=250)
+    quantum_instance = QuantumInstance(backend=backend, seed_simulator=seed, seed_transpiler=seed)
+    qaoa_mes = QAOA(optimizer=cobyla, reps=3, quantum_instance=quantum_instance)
+    qaoa = MinimumEigenOptimizer(qaoa_mes)
+    qaoa_result = qaoa.solve(qp)
+
+
+    vqe_assets = []
+    vqe = {}
+    for i in range(len(vqe_result.x)):
+        if(vqe_result[i] == 1):
+            vqe_assets.append(stocks[i])
+    data = pd.DataFrame(columns=vqe_assets)
+    data[vqe_assets] = data2[vqe_assets]
+    n = len(vqe_assets)
+    returns=data.pct_change()
+    weights = [random.random() for _ in range(n)]
+    sum_weights = sum(weights)
+    weights = [1*w/sum_weights for w in weights]
+    constraints = ({'type':'eq','fun':weight_check})
+    initial_guess = weights
+    bounds=insert_tuples(n)
+    results = minimize(sr_negate,weights,returns,method='SLSQP',bounds=bounds,constraints=constraints)
+    optimized_metrics = portfolio_val(results.x, returns)
+    vqe['Returns']=("{:.2f}%".format(optimized_metrics[0]*100))
+    vqe['Volatility']=("{:.2f}%".format(optimized_metrics[1]*100))
+    vqe['Sharpe Ratio']=("{:.2f}".format(optimized_metrics[2]))
+    for (x,y) in zip(vqe_assets,results.x):
+       vqe[x] = "{:.2f}%".format(y*100)
+
     
-    # Create a dictionary for Returns and Risk values of each portfolio
-    portfolio = {'Returns': port_returns, 'Volatility': port_volatility,'Sharpe Ratio': sharpe_ratio}
-
-    # extend original dictionary to accomodate each ticker and weight in the portfolio
-    assets = df.columns
-
-    for counter,asset in enumerate(assets):
-        portfolio[asset+' Weight'] = [Weight[counter] for Weight in stock_weights]
-    # make a nice dataframe of the extended dictionary
-    df_portfolio = pd.DataFrame(portfolio)   
-    return df_portfolio
-
-def plot_efficient_frontier(tickers):
-    df = download_prices(tickers)
-    annual_ret, cov_annual = calculate_variables(df)
-    df_portfolio = calculate_eff_frontier(df, annual_ret, cov_annual)
-    # find min Volatility & max sharpe values in the dataframe 
-    is_min_vol = df_portfolio['Volatility'] ==  df_portfolio['Volatility'].min()
-    is_max_sharpe = df_portfolio['Sharpe Ratio'] == df_portfolio['Sharpe Ratio'].max()
-    # use the min, max values to locate and create the two special portfolios
-    max_sharpe_port = df_portfolio.loc[is_max_sharpe]
-    min_vol_port = df_portfolio.loc[is_min_vol]
-
-    # plot frontier, max sharpe & min Volatility values with a scatterplot
-    plt.style.use('seaborn-dark')
-    df_portfolio.plot.scatter(x='Volatility', y='Returns', c='Sharpe Ratio',
-                            cmap='RdYlGn', edgecolors='black', figsize=(10, 8), grid=True)
-    plt.scatter(x=max_sharpe_port['Volatility'], y=max_sharpe_port['Returns'], c='red', marker='D', s=200)
-    plt.scatter(x=min_vol_port['Volatility'], y=min_vol_port['Returns'], c='blue', marker='D', s=200 )
-    plt.xlabel('Volatility (Std. Deviation)')
-    plt.ylabel('Expected Returns')
-    plt.title('Efficient Frontier')
-    # plt.savefig("./static/figures/efficient_frontier.png")
+    qaoa ={}
+    assets = []
+    for i in range(len(qaoa_result.x)):
+        if(qaoa_result[i] == 1):
+            assets.append(stocks[i])
+    data = pd.DataFrame(columns=assets)
+    data[assets] = data2[assets]
+    n = len(assets)
+    returns=data.pct_change()
+    weights = [random.random() for _ in range(n)]
+    sum_weights = sum(weights)
+    weights = [1*w/sum_weights for w in weights]
+    constraints = ({'type':'eq','fun':weight_check})
+    initial_guess = weights
+    bounds=insert_tuples(n)
+    results = minimize(sr_negate,weights,returns,method='SLSQP',bounds=bounds,constraints=constraints)
+    optimized_metrics = portfolio_val(results.x, returns)
+    qaoa['Returns']=("{:.2f}%".format(optimized_metrics[0]*100))
+    qaoa['Volatility']=("{:.2f}%".format(optimized_metrics[1]*100))
+    qaoa['Sharpe Ratio']=("{:.2f}".format(optimized_metrics[2]))
+    for (x,y) in zip(assets,results.x):
+       qaoa[x] = "{:.2f}%".format(y*100)
 
 
-def optimize(tickers):
-    df = download_prices(tickers)
-    annual_ret, cov_annual = calculate_variables(df)
-    df_portfolio = calculate_eff_frontier(df, annual_ret, cov_annual)
-    # find min Volatility & max sharpe values in the dataframe 
-    is_min_vol = df_portfolio['Volatility'] ==  df_portfolio['Volatility'].min()
-    is_max_sharpe = df_portfolio['Sharpe Ratio'] == df_portfolio['Sharpe Ratio'].max()
-    # use the min, max values to locate and create the two special portfolios
-    max_sharpe_port = df_portfolio.loc[is_max_sharpe].to_dict()
-    min_vol_port = df_portfolio.loc[is_min_vol].to_dict()
-    return min_vol_port, max_sharpe_port
+    return vqe,qaoa
+
